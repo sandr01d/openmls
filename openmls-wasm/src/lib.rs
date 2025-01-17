@@ -210,6 +210,20 @@ impl Group {
             .map_err(|e| e.into())
     }
 
+    pub fn create_message(
+        &mut self,
+        provider: &Provider,
+        sender: &Identity,
+        msg: &[u8],
+    ) -> Result<Vec<u8>, JsError> {
+        let msg_out = &self
+            .mls_group
+            .create_message(provider.as_ref(), &sender.keypair, msg)?;
+        let mut serialized = vec![];
+        msg_out.tls_serialize(&mut serialized)?;
+        Ok(serialized)
+    }
+
     pub fn process_message(
         &mut self,
         provider: &mut Provider,
@@ -357,10 +371,9 @@ mod tests {
         v.as_string().unwrap()
     }
 
-    #[test]
-    fn basic() {
+    fn create_group_alice_and_bob() -> (Provider, Identity, Group, Provider, Identity, Group) {
         let mut alice_provider = Provider::new();
-        let mut bob_provider = Provider::new();
+        let bob_provider = Provider::new();
 
         let alice = Identity::new(&alice_provider, "alice")
             .map_err(js_error_to_string)
@@ -385,7 +398,22 @@ mod tests {
 
         let ratchet_tree = chess_club_alice.export_ratchet_tree();
 
-        let mut chess_club_bob = Group::native_join(&bob_provider, &add_msgs.welcome, ratchet_tree);
+        let chess_club_bob = Group::native_join(&bob_provider, &add_msgs.welcome, ratchet_tree);
+
+        (
+            alice_provider,
+            alice,
+            chess_club_alice,
+            bob_provider,
+            bob,
+            chess_club_bob,
+        )
+    }
+
+    #[test]
+    fn basic() {
+        let (mut alice_provider, alice, mut chess_club_alice, mut bob_provider, _, mut chess_club_bob) =
+            create_group_alice_and_bob();
 
         let bob_exported_key = chess_club_bob
             .export_key(&bob_provider, "chess_key", &[0x30], 32)
@@ -396,7 +424,7 @@ mod tests {
             .map_err(js_error_to_string)
             .unwrap();
 
-        assert_eq!(bob_exported_key, alice_exported_key);
+        assert_eq!(alice_exported_key, bob_exported_key);
 
         // Create a third user "carl"
         let carl_provider = Provider::new();
@@ -449,5 +477,24 @@ mod tests {
             .map_err(js_error_to_string)
             .unwrap();
         assert_eq!(bob_exported_key, alice_exported_key);
+    }
+
+    #[test]
+    fn create_message() {
+        let (alice_provider, alice, mut chess_club_alice, mut bob_provider, _, mut chess_club_bob) =
+            create_group_alice_and_bob();
+
+        let alice_msg = "hello, bob!".as_bytes();
+        let msg_out = chess_club_alice
+            .create_message(&alice_provider, &alice, alice_msg)
+            .map_err(js_error_to_string)
+            .unwrap();
+
+        let bob_msg = chess_club_bob
+            .process_message(&mut bob_provider, &msg_out)
+            .map_err(js_error_to_string)
+            .unwrap();
+
+        assert_eq!(alice_msg, bob_msg);
     }
 }
