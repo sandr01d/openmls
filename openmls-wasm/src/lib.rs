@@ -1,12 +1,14 @@
 mod utils;
 
+use std::vec;
+
 use js_sys::Uint8Array;
 use openmls::{
     credentials::{BasicCredential, CredentialWithKey},
     framing::{MlsMessageBodyIn, MlsMessageIn, MlsMessageOut},
     group::{GroupId, MlsGroup, MlsGroupJoinConfig, StagedWelcome},
     key_packages::KeyPackage as OpenMlsKeyPackage,
-    prelude::SignatureScheme,
+    prelude::{group_info::GroupInfo, SignatureScheme},
     treesync::RatchetTreeIn,
 };
 use openmls_basic_credential::SignatureKeyPair;
@@ -138,6 +140,25 @@ impl AddMessages {
 }
 
 #[wasm_bindgen]
+pub struct RemoveMessages {
+    commit: Uint8Array,
+    welcome: Uint8Array,
+}
+
+#[wasm_bindgen]
+impl RemoveMessages {
+    #[wasm_bindgen(getter)]
+    pub fn commit(&self) -> Uint8Array {
+        self.commit.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn welcome(&self) -> Uint8Array {
+        self.welcome.clone()
+    }
+}
+
+#[wasm_bindgen]
 impl Group {
     pub fn create_new(provider: &Provider, founder: &Identity, group_id: &str) -> Group {
         let group_id_bytes = group_id.bytes().collect::<Vec<_>>();
@@ -202,6 +223,48 @@ impl Group {
             commit,
             welcome,
         })
+    }
+
+    pub fn remove_members_and_commit(
+        &mut self,
+        provider: &mut Provider,
+        sender: &Identity,
+        members: Vec<KeyPackage>,
+    ) -> Result<RemoveMessages, JsError> {
+        let (commit_msg, welcome_msg, _) =
+            self.remove_members_and_commit_inner(provider, sender, members)?;
+
+        let commit = mls_message_to_uint8array(&commit_msg);
+        let welcome = welcome_msg.map_or(Uint8Array::new_with_length(0), |msg| {
+            mls_message_to_uint8array(&msg)
+        });
+
+        Ok(RemoveMessages { commit, welcome })
+    }
+
+    fn remove_members_and_commit_inner(
+        &mut self,
+        provider: &mut Provider,
+        sender: &Identity,
+        members: Vec<KeyPackage>,
+    ) -> Result<(MlsMessageOut, Option<MlsMessageOut>, Option<GroupInfo>), JsError> {
+        let removed_signature_keys: Vec<&[u8]> = members
+            .iter()
+            .map(|package| package.0.leaf_node().signature_key().as_slice())
+            .collect();
+        let members: Vec<openmls::prelude::LeafNodeIndex> = self
+            .mls_group
+            .members()
+            .filter(|member| removed_signature_keys.contains(&member.signature_key.as_ref()))
+            .map(|member| member.index)
+            .collect();
+
+        let result = self
+            .mls_group
+            .remove_members(&provider.0, &sender.keypair, &members)?;
+
+        self.merge_pending_commit(provider)?;
+        Ok(result)
     }
 
     pub fn merge_pending_commit(&mut self, provider: &mut Provider) -> Result<(), JsError> {
@@ -496,5 +559,42 @@ mod tests {
             .unwrap();
 
         assert_eq!(alice_msg, bob_msg);
+    }
+
+    #[test]
+    fn remove_members() {
+        let (
+            mut alice_provider,
+            alice,
+            mut chess_club_alice,
+            mut bob_provider,
+            bob,
+            mut chess_club_bob,
+        ) = create_group_alice_and_bob();
+
+        let bob_key_pkg = bob.key_package(&bob_provider);
+
+        let (commit, _, _) = chess_club_alice
+            .remove_members_and_commit_inner(&mut alice_provider, &alice, vec![bob_key_pkg])
+            .unwrap();
+
+        // Alices key should have changed
+        let alice_exported_key = chess_club_alice
+            .export_key(&alice_provider, "chess_key", &[0x30], 32)
+            .map_err(js_error_to_string)
+            .unwrap();
+        let bob_exported_key = chess_club_bob
+            .export_key(&bob_provider, "chess_key", &[0x30], 32)
+            .map_err(js_error_to_string)
+            .unwrap();
+        assert_ne!(alice_exported_key, bob_exported_key);
+
+        let bytes = commit.to_bytes().unwrap();
+        chess_club_bob
+            .process_message(&mut bob_provider, &bytes)
+            .unwrap();
+
+        // Bobs group should no longer be active
+        assert!(!chess_club_bob.mls_group.is_active());
     }
 }
